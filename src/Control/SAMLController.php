@@ -3,7 +3,7 @@
 namespace SilverStripe\SAML\Control;
 
 use Exception;
-use function gmmktime;
+use function in_array;
 use OneLogin\Saml2\Auth;
 use OneLogin\Saml2\Constants;
 use OneLogin\Saml2\Utils;
@@ -86,12 +86,8 @@ class SAMLController extends Controller
 
         // If there was an issue with the SAML response, if it was missing or if the SAML response indicates that they
         // aren't authorised, then log the issue and provide a traceable error back to the user via the login form
-        if (
-            $caughtException ||
-            !empty($error) ||
-            !$auth->isAuthenticated() ||
-            $this->checkForReplayAttack($auth, $uniqueErrorId)
-        ) {
+        $hasError = $caughtException || !empty($error);
+        if ($hasError || !$auth->isAuthenticated() || $this->checkForReplayAttack($auth, $uniqueErrorId)) {
             if ($caughtException instanceof Exception) {
                 $this->getLogger()->error(sprintf(
                     '[%s] [code: %s] %s (%s:%s)',
@@ -167,26 +163,35 @@ class SAMLController extends Controller
             }
 
             $member->GUID = $guid;
-        } else if(!($member && $member->exists())) {
+        } elseif (!($member && $member->exists())) {
             // If the member doesn't exist and we don't allow linking via email, then create a new member
             $member = new Member();
             $member->GUID = $guid;
         }
 
+        $attributes = $auth->getAttributes();
+        $allowedMissingAttributes = $member->config()->allowed_missing_attributes;
+
         foreach ($member->config()->claims_field_mappings as $claim => $field) {
             if (!isset($attributes[$claim][0])) {
-                $this->getLogger()->warning(
-                    sprintf(
-                        'Claim rule \'%s\' configured in SAMLMemberExtension.claims_field_mappings, ' .
-                                'but wasn\'t passed through. Please check IdP claim rules.',
-                        $claim
-                    )
-                );
+                // If we don't expect to occasionally miss this attribute, log a warning about missing it
+                // This allows developers to mark attributes they expect to be missing for some users (e.g. cellphone)
+                if (!is_array($allowedMissingAttributes) || !in_array($claim, $allowedMissingAttributes)) {
+                    $this->getLogger()->warning(
+                        sprintf(
+                            'Claim rule \'%s\' configured in Member.claims_field_mappings, ' .
+                            'but wasn\'t passed through and isn\'t allowed to be missing. Please check IdP claim rules.',
+                            $claim
+                        )
+                    );
+                }
 
+                // If the attribute isn't returned, we should remove the info from the member
+                $member->$field = '';
                 continue;
+            } else {
+                $member->$field = $attributes[$claim][0];
             }
-
-            $member->$field = $attributes[$claim][0];
         }
 
         $member->SAMLSessionIndex = $auth->getSessionIndex();
